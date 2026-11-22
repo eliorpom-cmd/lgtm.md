@@ -70,7 +70,7 @@ const COTTAGE: [&str; 8] = [
 const PINE: [&str; 6] = ["..t..", ".ttt.", "..t..", ".ttt.", "ttttt", "..t.."];
 const ROUND_TREE: [&str; 5] = [".ttt.", "ttttt", "ttttt", ".ttt.", "..t.."];
 
-const HIDDEN_LANGUAGES: [&str; 7] = ["HTML", "CSS", "SCSS", "MDX", "Jupyter Notebook", "Dockerfile", "Makefile"];
+use crate::pixel::HIDDEN_LANGUAGES;
 
 /// `(cycles, wavelength, phase, strength)` of the gust bands.
 type Phases = [(i64, i64, f64, f64); 3];

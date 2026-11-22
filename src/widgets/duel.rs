@@ -577,7 +577,7 @@ impl Camp {
 /// written under the output name the user asked for.
 pub fn render_as(data: &Data, login: &str, days: i64, name: &str) -> String {
     let period = period(days);
-    let friend = data.friends.get(login).unwrap_or_else(|| panic!("no friend {login} in data.json"));
+    let friend = data.friend(login).unwrap_or_else(|| panic!("no friend {login} in data.json"));
     let accounts = [(true, data.login.clone(), data), (false, friend.login.clone(), friend)];
     let span = period.pillars * period.pitch - (period.pitch - period.width);
     let camps: Vec<Camp> = accounts

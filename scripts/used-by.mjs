@@ -145,7 +145,7 @@ async function main() {
   // Rewrite only when the logins or avatars changed: last_seen alone moving every week would
   // otherwise make a commit each run.
   const sig = (arr) => JSON.stringify((Array.isArray(arr) ? arr : []).map((e) => [e.login, e.avatar || "", e.first_seen || e.captured || ""]));
-  if (sig(before) === sig(list) && before.every((e) => e.last_seen && daysBetween(e.last_seen, today) < 28)) {
+  if (Array.isArray(before) && sig(before) === sig(list) && before.every((e) => e.last_seen && daysBetween(e.last_seen, today) < 28)) {
     console.error("No change.");
     return;
   }

@@ -39,7 +39,7 @@ fn project_caption(name: &str) -> String {
     if name == "departures" {
         return "Project stats".into(); // Commits, merged PRs, stars and the main language.
     }
-    account_caption(name).replace("Contributions", "Commits").replace("contributions", "commits").replace("Activity", "Commits")
+    account_caption(name).replace("Contribution", "Commit").replace("contribution", "commit").replace("Activity", "Commits")
 }
 
 /// What a widget shows, for the left of the band: the repository's name first in project mode.
@@ -57,7 +57,8 @@ fn captions(name: &str) -> [String; 2] {
 /// What a widget shows for an account.
 fn account_caption(name: &str) -> String {
     let fixed = match name {
-        "flame" => "Commit streak",
+        // Any contribution keeps an account's streak alive (PRs, reviews, issues), not only commits.
+        "flame" => "Contribution streak",
         "counter" => "Contributions · 12 months",
         "hourglass" => "Commits · 12 months",
         "ecg" => "Contributions · 7 days",

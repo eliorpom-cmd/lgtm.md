@@ -124,7 +124,7 @@ fn recent_prs(data: &Data) -> Vec<&MergedPr> {
     // since = last + 1 day - 7 days.
     let since = last - 6;
     let mut prs: Vec<&MergedPr> =
-        data.merged_prs.iter().filter(|pr| crate::dates::day_number(&pr.merged_at[..10]) >= since).collect();
+        data.merged_prs.iter().filter(|pr| crate::dates::day_number(pr.merged_at.get(..10).unwrap_or(&pr.merged_at)) >= since).collect();
     prs.sort_by(|a, b| a.merged_at.cmp(&b.merged_at));
     prs
 }

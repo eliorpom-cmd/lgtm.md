@@ -498,7 +498,11 @@ fn build_background(data: &Data, weeks: &[i64], empties: &[i64]) -> Canvas {
         }
     }
     // Month labels: a tick at the week holding the 1st, the name under that month.
+    // Without a year of days (an old or hand-written data.json) there is nothing to label.
     let year_days = data.year_days();
+    if year_days.is_empty() || week_count == 0 {
+        return canvas;
+    }
     let (ly, lm, ld) = crate::dates::parse_iso(&year_days[year_days.len() - 1].date);
     let last_num = crate::dates::days_from_civil(ly, lm, ld);
     let first_num = last_num - (week_count * 7 - 1);
