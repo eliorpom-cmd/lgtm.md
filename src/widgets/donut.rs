@@ -63,7 +63,7 @@ const DROP: [&str; 12] = [
     "...dddd....",
 ];
 
-const HIDDEN_LANGUAGES: [&str; 7] = ["HTML", "CSS", "SCSS", "MDX", "Jupyter Notebook", "Dockerfile", "Makefile"];
+use crate::pixel::HIDDEN_LANGUAGES;
 
 /// `math.radians(x)`: CPython multiplies by `pi / 180`.
 fn py_radians(x: f64) -> f64 {

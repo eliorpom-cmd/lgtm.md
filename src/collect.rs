@@ -1,6 +1,8 @@
 //! Port of `collect.py`: reads an account's activity from GitHub's GraphQL API into data.json.
 //!
-//! Usage: lgtm-md collect <login> [out.json] [friend...]
+//! Usage: lgtm-md collect <login> [out.json] [friend...] [--widgets=<names>]
+//! `--widgets` (space or comma separated) skips the data no listed widget draws: the followed
+//! accounts (median only) and the commit history (hourglass and fireworks-commits only).
 //! Token: `GITHUB_TOKEN`, else `GH_TOKEN`, else `gh auth token`. A personal token with the
 //! `repo` scope sees private contributions, private repositories and their languages.
 //!
@@ -50,9 +52,9 @@ impl Client {
         Ok(Client { token, agent })
     }
 
-    /// Runs a query and returns its `data`. GitHub answers heavy queries with 502/503/504
-    /// now and then: those are retried after a pause.
-    fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+    /// Posts a query and returns GitHub's whole reply (`data` and `errors`). Busy answers
+    /// (502/503/504), dropped connections and timeouts are retried after a pause.
+    fn post(&self, query: &str, variables: Value) -> Result<Value> {
         let body = json!({"query": query, "variables": variables});
         let mut attempt = 0;
         let mut response = loop {
@@ -66,14 +68,19 @@ impl Client {
                 Err(ureq::Error::StatusCode(code)) if (502..=504).contains(&code) && attempt < RETRIES => {
                     std::thread::sleep(std::time::Duration::from_secs(3 * attempt as u64));
                 }
-                // A dropped connection is retried the same way.
-                Err(ureq::Error::Io(_)) if attempt < RETRIES => {
+                // A dropped connection or a client-side timeout is retried the same way.
+                Err(ureq::Error::Io(_) | ureq::Error::Timeout(_)) if attempt < RETRIES => {
                     std::thread::sleep(std::time::Duration::from_secs(3 * attempt as u64));
                 }
                 Err(error) => return Err(format!("GitHub API: {error}")),
             }
         };
-        let mut reply: Value = response.body_mut().read_json().map_err(|e| format!("GitHub API reply: {e}"))?;
+        response.body_mut().read_json().map_err(|e| format!("GitHub API reply: {e}"))
+    }
+
+    /// Runs a query and returns its `data`; any error in the reply fails the call.
+    fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let mut reply = self.post(query, variables)?;
         // A partial reply (data plus errors) would read as zeros: fail instead.
         let has_errors = reply.get("errors").and_then(Value::as_array).is_some_and(|errors| !errors.is_empty());
         match reply.get_mut("data") {
@@ -114,7 +121,7 @@ impl Client {
 }
 
 /// The last year of daily contributions, up to yesterday (UTC).
-fn calendar(client: &Client, login: &str) -> Result<(i64, Vec<Value>)> {
+fn calendar(client: &Client, login: &str) -> Result<Vec<Value>> {
     let query = r#"
     query($login: String!) {
       user(login: $login) {
@@ -133,12 +140,57 @@ fn calendar(client: &Client, login: &str) -> Result<(i64, Vec<Value>)> {
         .flat_map(|week| week["contributionDays"].as_array().cloned().unwrap_or_default())
         .filter(|day| day["date"].as_str().unwrap_or("") <= yesterday.as_str())
         .collect();
-    Ok((result["totalContributions"].as_i64().unwrap_or(0), days))
+    Ok(days)
+}
+
+/// Sum of the daily counts. The calendar's own `totalContributions` also counts today, which
+/// the daily series, the streak and "yesterday" leave out.
+fn total(days: &[Value]) -> i64 {
+    days.iter().map(|day| day["contributionCount"].as_i64().unwrap_or(0)).sum()
 }
 
 /// Consecutive days with at least one contribution, ending yesterday.
 fn streak(days: &[Value]) -> i64 {
     days.iter().rev().take_while(|day| day["contributionCount"].as_i64().unwrap_or(0) != 0).count() as i64
+}
+
+/// A streak that fills the whole calendar goes on before it: earlier years are read one at a
+/// time, back to the first day without contributions (20 years at most). `end` is the first
+/// day of the calendar; returns the active days before it.
+fn older_streak(client: &Client, login: &str, mut end: i64) -> Result<i64> {
+    let query = r#"
+    query($login: String!, $from: DateTime!, $to: DateTime!) {
+      user(login: $login) {
+        contributionsCollection(from: $from, to: $to) {
+          contributionCalendar { weeks { contributionDays { date contributionCount } } }
+        }
+      }
+    }"#;
+    let mut extra = 0;
+    for _ in 0..20 {
+        // At most a year per query: GitHub refuses longer spans.
+        let start = end - 365;
+        let vars = json!({"login": login, "from": format!("{}T00:00:00Z", iso(start)), "to": format!("{}T23:59:59Z", iso(end - 1))});
+        let data = client.graphql(query, vars)?;
+        let (first, last) = (iso(start), iso(end - 1));
+        let days: Vec<Value> = data["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|week| week["contributionDays"].as_array().cloned().unwrap_or_default())
+            .filter(|day| {
+                let date = day["date"].as_str().unwrap_or("");
+                date >= first.as_str() && date <= last.as_str()
+            })
+            .collect();
+        let run = streak(&days);
+        extra += run;
+        if days.is_empty() || run < days.len() as i64 {
+            break;
+        }
+        end = start;
+    }
+    Ok(extra)
 }
 
 /// PRs merged between two dates, both included, with the main language of their repository.
@@ -283,7 +335,8 @@ fn commits_by_month(client: &Client, login: &str, repos: &[Value], windows: &[(i
                 )
             })
             .collect();
-        let result = client.graphql(&format!("query {{ {} }}", parts.join(" ")), json!({}))?;
+        let names: Vec<&str> = chunk.iter().map(|repo| repo["name"].as_str().unwrap_or("?")).collect();
+        let result = history_batch(client, &parts, &names)?;
         for (r, repo) in chunk.iter().enumerate() {
             let branch = &result[format!("r{r}")]["defaultBranchRef"];
             if branch.is_null() {
@@ -331,6 +384,34 @@ fn commits_by_month(client: &Client, login: &str, repos: &[Value], windows: &[(i
         .collect())
 }
 
+/// One batch of owned repositories' histories. A repository GitHub refuses to read (disabled,
+/// blocked) comes back as an error on its own alias: it is left out with a warning instead of
+/// failing every nightly run for good. Any other error still fails the collection.
+fn history_batch(client: &Client, parts: &[String], names: &[&str]) -> Result<Value> {
+    let mut reply = client.post(&format!("query {{ {} }}", parts.join(" ")), json!({}))?;
+    let errors = reply.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
+    let data = reply.get_mut("data").map(Value::take).unwrap_or(Value::Null);
+    if errors.is_empty() && !data.is_null() {
+        return Ok(data);
+    }
+    let alias = |error: &Value| {
+        let first = error["path"].get(0).and_then(Value::as_str)?;
+        let index: usize = first.strip_prefix('r')?.parse().ok()?;
+        (index < parts.len()).then_some(first.to_string())
+    };
+    if data.is_null() || errors.iter().any(|error| alias(error).is_none()) {
+        return Err(format!("GitHub API error: {}", Value::Array(errors)));
+    }
+    let mut data = data;
+    for error in &errors {
+        let key = alias(error).expect("checked above");
+        let name = names.get(key[1..].parse::<usize>().unwrap_or(usize::MAX)).copied().unwrap_or("?");
+        eprintln!("warning: skipped {name}, GitHub could not read its history: {}", error["message"].as_str().unwrap_or("error"));
+        data[key] = Value::Null;
+    }
+    Ok(data)
+}
+
 /// Downloads the profile picture next to data.json; returns its path relative to it.
 fn avatar(client: &Client, login: &str, base: &Path) -> Result<String> {
     let dir = base.join("avatars");
@@ -342,17 +423,47 @@ fn avatar(client: &Client, login: &str, base: &Path) -> Result<String> {
     Ok(relative)
 }
 
-fn account(client: &Client, login: &str, full: bool, base: &Path) -> Result<Map<String, Value>> {
-    let (total, year_days) = calendar(client, login)?;
+/// What a collection can leave out when only some widgets are drawn.
+#[derive(Clone, Copy)]
+struct Needs {
+    /// The accounts this one follows: median only. Up to 100 heavy pages.
+    following: bool,
+    /// Commits per month and over 7 days, read from every owned repository: hourglass and
+    /// fireworks-commits only.
+    history: bool,
+}
+
+impl Needs {
+    const ALL: Needs = Needs { following: true, history: true };
+
+    /// From the widget names the Action draws; no names means every widget.
+    fn of(widgets: &[&str]) -> Needs {
+        if widgets.is_empty() {
+            return Needs::ALL;
+        }
+        Needs {
+            following: widgets.contains(&"median"),
+            history: widgets.iter().any(|name| *name == "hourglass" || *name == "fireworks-commits"),
+        }
+    }
+}
+
+fn account(client: &Client, login: &str, full: Option<Needs>, base: &Path) -> Result<Map<String, Value>> {
+    let year_days = calendar(client, login)?;
+    let mut run = streak(&year_days);
+    if run > 0 && run == year_days.len() as i64 {
+        let first = crate::dates::day_number(year_days[0]["date"].as_str().unwrap_or(""));
+        run += older_streak(client, login, first)?;
+    }
     // Same key order as collect.py.
     let mut data = Map::new();
     data.insert("login".into(), json!(login));
-    data.insert("total_contributions".into(), json!(total));
-    data.insert("streak".into(), json!(streak(&year_days)));
+    data.insert("total_contributions".into(), json!(total(&year_days)));
+    data.insert("streak".into(), json!(run));
     data.insert("year_days".into(), json!(year_days));
     data.insert("days".into(), json!(year_days[year_days.len().saturating_sub(DAYS)..]));
     data.insert("avatar".into(), json!(avatar(client, login, base)?));
-    if full {
+    if let Some(needs) = full {
         let now = today();
         let prs = merged_prs(client, &format!("author:{login}"), &iso(now - 30), &iso(now - 1))?;
         let count = prs.len();
@@ -360,23 +471,41 @@ fn account(client: &Client, login: &str, full: bool, base: &Path) -> Result<Map<
         data.insert("merged_prs_30d".into(), json!(count));
         let repos = owned_repos(client, login)?;
         data.insert("languages".into(), json!(languages(&repos)));
-        data.insert("following".into(), json!(following_totals(client, login)?));
-        // The 7 days ending yesterday ride along as a 13th window: one pass over the history.
-        let mut windows = month_windows(12);
-        windows.push((now - 7, now));
-        let mut months = commits_by_month(client, login, &repos, &windows)?;
-        let week = months.pop().expect("13 windows");
-        data.insert("commits_by_month".into(), json!(months));
-        data.insert("commits_7d".into(), week["languages"].clone());
+        if needs.following {
+            data.insert("following".into(), json!(following_totals(client, login)?));
+        }
+        if needs.history {
+            // The 7 days ending yesterday ride along as a 13th window: one pass over the history.
+            let mut windows = month_windows(12);
+            windows.push((now - 7, now));
+            let mut months = commits_by_month(client, login, &repos, &windows)?;
+            let week = months.pop().expect("13 windows");
+            data.insert("commits_by_month".into(), json!(months));
+            data.insert("commits_7d".into(), week["languages"].clone());
+        }
     }
     Ok(data)
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    // `--widgets=<names>` may sit anywhere; the other arguments keep their places.
+    let mut widgets: Vec<&str> = Vec::new();
+    let args: Vec<String> = args
+        .iter()
+        .filter(|arg| match arg.strip_prefix("--widgets=") {
+            Some(list) => {
+                widgets.extend(list.split([' ', ',', '\n']).filter(|name| !name.is_empty()));
+                false
+            }
+            None => true,
+        })
+        .cloned()
+        .collect();
+    let needs = Needs::of(&widgets);
     if args.first().map(String::as_str) == Some("--repo") {
         return run_project(&args[1..]);
     }
-    let login = args.first().ok_or("usage: lgtm-md collect <login> [out.json] [friend...]")?;
+    let login = args.first().ok_or("usage: lgtm-md collect <login> [out.json] [friend...] [--widgets=<names>]")?;
     for name in args.iter().take(1).chain(args.iter().skip(2)) {
         if !crate::data::valid_login(name) {
             return Err(format!("not a GitHub login: {name:?}"));
@@ -385,11 +514,11 @@ pub fn run(args: &[String]) -> Result<()> {
     let out = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("data.json"));
     let base = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
     let client = Client::new()?;
-    let mut data = account(&client, login, true, &base)?;
+    let mut data = account(&client, login, Some(needs), &base)?;
     // Optional accounts to duel against, public data only.
     let mut friends = Map::new();
     for friend in args.iter().skip(2) {
-        friends.insert(friend.clone(), Value::Object(account(&client, friend, false, &base)?));
+        friends.insert(friend.clone(), Value::Object(account(&client, friend, None, &base)?));
     }
     data.insert("friends".into(), Value::Object(friends));
     let text = serde_json::to_string_pretty(&Value::Object(data)).map_err(|e| e.to_string())?;
@@ -437,7 +566,9 @@ fn count_days(client: &Client, owner: &str, name: &str, chunk: &[i64]) -> Result
         );
         let data = match client.graphql(&query, json!({"owner": owner, "name": name})) {
             Ok(data) => data,
-            Err(error) if chunk.len() > 1 && error.contains("http status: 50") => {
+            // A busy status (already retried), a client timeout, or a 200 reply whose errors say
+            // the query took too long: a smaller batch may pass. Auth and 4xx errors don't split.
+            Err(error) if chunk.len() > 1 && splittable(&error) => {
                 let (left, right) = chunk.split_at(chunk.len() / 2);
                 let mut days = count_days(client, owner, name, left)?;
                 days.extend(count_days(client, owner, name, right)?);
@@ -453,6 +584,11 @@ fn count_days(client: &Client, owner: &str, name: &str, chunk: &[i64]) -> Result
         }
     }
     Ok(days)
+}
+
+fn splittable(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    error.contains("http status: 50") || error.starts_with("GitHub API error") || lower.contains("timeout") || lower.contains("timed out")
 }
 
 /// How many PRs were merged between two dates, both included, past search's 1000-result cap.

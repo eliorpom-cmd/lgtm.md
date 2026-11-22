@@ -133,7 +133,7 @@ fn main() {
             std::process::exit(2);
         }
         if let Some((login, _)) = widgets::parse_duel(name).filter(|_| !catalog.iter().any(|(key, _)| key == name))
-            && !data.friends.contains_key(&login) {
+            && data.friend(&login).is_none() {
                 eprintln!("{name}: {login} is not in data.json; collect it with `lgtm-md collect <you> data.json {login}`");
                 std::process::exit(2);
             }

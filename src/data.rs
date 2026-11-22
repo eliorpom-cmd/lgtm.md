@@ -144,6 +144,11 @@ pub fn resolve(relative: &str) -> std::path::PathBuf {
 }
 
 impl Data {
+    /// A compared account, by login. GitHub logins ignore case, so `Torvalds` finds `torvalds`.
+    pub fn friend(&self, login: &str) -> Option<&Data> {
+        self.friends.get(login).or_else(|| self.friends.iter().find(|(key, _)| key.eq_ignore_ascii_case(login)).map(|(_, data)| data))
+    }
+
     pub fn load(path: &std::path::Path) -> Result<Data, String> {
         if let Some(parent) = path.parent() {
             let _ = BASE.set(parent.to_path_buf());

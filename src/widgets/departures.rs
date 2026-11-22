@@ -56,7 +56,7 @@ const SWITCH_AT: i64 = 4;
 const FLIP_FRAMES: i64 = 3; // One character change: top flap falls, edge-on, bottom flap lands.
 const DRUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789%";
 
-const HIDDEN_LANGUAGES: [&str; 7] = ["HTML", "CSS", "SCSS", "MDX", "Jupyter Notebook", "Dockerfile", "Makefile"];
+use crate::pixel::HIDDEN_LANGUAGES;
 
 /// One flap face: 40 rows of 18 colours, `None` meaning "painted face".
 type Rows = Vec<Vec<Option<Rgb>>>;

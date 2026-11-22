@@ -102,7 +102,11 @@ runs:
           while IFS= read -r login; do
             [ -n "$login" ] && friends+=("$login")
           done < <("$LGTM_MD_BIN" duel-logins ${names[@]+"${names[@]}"})
-          "$LGTM_MD_BIN" collect "$USER_LOGIN" "$work/data.json" ${friends[@]+"${friends[@]}"}
+          # Named widgets: the collection skips the data none of them draws (followed accounts,
+          # commit history), so a slow or failing part of the API can't fail an unrelated widget.
+          only=()
+          [ ${#names[@]} -gt 0 ] && only=("--widgets=${names[*]}")
+          "$LGTM_MD_BIN" collect "$USER_LOGIN" "$work/data.json" ${friends[@]+"${friends[@]}"} ${only[@]+"${only[@]}"}
         fi
         mkdir -p "$OUTPUT_DIR"
         "$LGTM_MD_BIN" "$work/data.json" ${names[@]+"${names[@]}"} --out "$OUTPUT_DIR"

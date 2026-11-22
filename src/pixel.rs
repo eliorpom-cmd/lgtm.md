@@ -19,6 +19,9 @@ pub const TEXT: Rgb = [230, 237, 243];
 pub const MUTED: Rgb = [139, 148, 158];
 pub const GREEN: Rgb = [63, 185, 80];
 
+/// Markup and build files left out of every language view (donut, grass flowers, departures).
+pub const HIDDEN_LANGUAGES: [&str; 7] = ["HTML", "CSS", "SCSS", "MDX", "Jupyter Notebook", "Dockerfile", "Makefile"];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Font {
     F57,
@@ -69,7 +72,7 @@ pub fn font57(ch: char) -> Option<&'static str> {
         ' ' => "00000000000000000000000000000000000", '.' => "00000000000000000000000000110001100",
         '-' => "00000000000000011111000000000000000", '+' => "00000001000010011111001000010000000",
         '/' => "00001000100001000100010001000010000", '%' => "11000110010001000100010001001100011",
-        ':' => "00000011000110000000011000110000000",
+        ':' => "00000011000110000000011000110000000", '#' => "01010010101111101010111110101001010",
         _ => return None,
     })
 }
@@ -86,15 +89,23 @@ pub fn font35(ch: char) -> Option<&'static str> {
         '2' => "110001010100111", '3' => "110001010001110", '4' => "101101111001001", '5' => "111100110001110",
         '6' => "011100111101111", '7' => "111001010010010", '8' => "111101111101111", '9' => "111101111001110",
         ' ' => "000000000000000", '.' => "000000000000010", '+' => "000010111010000", '-' => "000000111000000",
-        '/' => "001001010100100",
+        '/' => "001001010100100", '#' => "101111101111101",
         _ => return None,
     })
 }
 
-/// `rgb("#3572A5")`.
+/// `rgb("#3572A5")`. The short form `#fff` is expanded; anything else unreadable reads as 0,
+/// channel by channel, instead of panicking on a colour written by hand in data.json.
 pub fn rgb(hex: &str) -> Rgb {
     let hex = hex.trim_start_matches('#');
-    let part = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0);
+    let long: String;
+    let hex = if hex.len() == 3 && hex.is_ascii() {
+        long = hex.chars().flat_map(|c| [c, c]).collect();
+        long.as_str()
+    } else {
+        hex
+    };
+    let part = |i: usize| hex.get(i..i + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()).unwrap_or(0);
     [part(0), part(2), part(4)]
 }
 
@@ -297,8 +308,9 @@ pub fn weekly_totals(days: &[Day]) -> Vec<i64> {
 /// "2026-11-02" -> "NOV 02".
 pub fn short_date(iso: &str) -> String {
     const MONTHS: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-    let month: usize = iso[5..7].parse().unwrap_or(1);
-    format!("{} {}", MONTHS[month - 1], &iso[8..10])
+    // A short or odd date (a null read as "") falls back instead of panicking.
+    let month: usize = iso.get(5..7).and_then(|m| m.parse().ok()).filter(|m| (1..=12).contains(m)).unwrap_or(1);
+    format!("{} {}", MONTHS[month - 1], iso.get(8..10).unwrap_or("--"))
 }
 
 /// Fallback colours for languages whose GitHub colours look alike: bright, far apart, and

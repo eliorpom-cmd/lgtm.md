@@ -307,7 +307,17 @@ fn nice_step(total: i64, capacity: i64) -> i64 {
             return step;
         }
     }
-    NICE_STEPS[NICE_STEPS.len() - 1]
+    // Past the table (over about a million commits a year, bot-driven repositories): keep going
+    // with 10 000, 20 000, 50 000... so the grains never outnumber the cells of the bulb.
+    let mut step = NICE_STEPS[NICE_STEPS.len() - 1] * 2;
+    loop {
+        for factor in [1, 2, 5] {
+            if total as f64 / (step * factor) as f64 <= limit.max(1) as f64 {
+                return step * factor;
+            }
+        }
+        step *= 10;
+    }
 }
 
 /// Grains per month, split by language with largest remainders, oldest month first.
@@ -731,8 +741,11 @@ pub fn render(data: &Data) -> String {
         // Right column: total, legend, grain value.
         let x0: i64 = 150;
         let number = total.to_string();
-        canvas.text(x0 as f64, 12.0, &number, NUMBER, Font::F57, 4, Some([70, 44, 20]));
-        let nx = x0 + text_width(&number, Font::F57, 4) + 10;
+        // Six digits and more (very busy repositories): a smaller number keeps "LAST 12 MONTHS"
+        // inside the widget. Up to five digits nothing changes.
+        let size = if x0 + text_width(&number, Font::F57, 4) + 10 + text_width("LAST 12 MONTHS", Font::F35, 2) <= W - 4 { 4 } else { 3 };
+        canvas.text(x0 as f64, 12.0, &number, NUMBER, Font::F57, size, Some([70, 44, 20]));
+        let nx = x0 + text_width(&number, Font::F57, size) + 10;
         canvas.text(nx as f64, 12.0, if total == 1 { "COMMIT" } else { "COMMITS" }, TEXT, Font::F57, 2, None);
         canvas.text(nx as f64, 30.0, "LAST 12 MONTHS", MUTED, Font::F35, 2, None);
         if !legend.is_empty() {
@@ -750,7 +763,9 @@ pub fn render(data: &Data) -> String {
                 canvas.text((lx + 14) as f64, ly as f64, &label, TEXT, Font::F35, 2, None);
             }
             let unit = if step == 1 { "COMMIT" } else { "COMMITS" };
-            let mut line = format!("1 GRAIN = {step} {unit}");
+            // Steps of 10 000 and more only come past a million commits a year: written 10K.
+            let amount = if step >= 10_000 { format!("{}K", step / 1000) } else { step.to_string() };
+            let mut line = format!("1 GRAIN = {amount} {unit}");
             if text_width(&line, Font::F57, 2) > W - x0 - 6 {
                 line = line.replace(" = ", "="); // Big steps: tighten so the line fits.
             }
