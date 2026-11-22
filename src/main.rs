@@ -1,7 +1,7 @@
 //! LGTM.md: animated pixel-art widgets for a GitHub profile README.
 //!
 //! Usage: lgtm-md <data.json> [names...] [--out DIR] [--stills] [--loop] [--raw DIR] [--raw-only]
-//!        lgtm-md collect <login> [out.json] [friend...]
+//!        lgtm-md collect <login> [out.json] [friend...] [--widgets=<names>]
 //!        lgtm-md collect --repo <owner/name> [out.json]
 //!        lgtm-md duel-logins <names...>   (rivals to collect for these widget names)
 //!        lgtm-md pycheck <cases.json>   (parity check of the Python primitives)
@@ -23,7 +23,9 @@ const USAGE: &str = "\
 LGTM.md: animated pixel-art widgets for a GitHub profile README.
 
 Usage:
-  lgtm-md collect <login> [data.json] [friend...]   read an account's activity from GitHub
+  lgtm-md collect <login> [data.json] [friend...] [--widgets=<names>]
+                                                    read an account's activity from GitHub;
+                                                    with --widgets, only what they draw
   lgtm-md collect --repo <owner/name> [data.json]   read a repository's activity instead
   lgtm-md <data.json> [widget...] [--out DIR]       draw the widgets as GIFs (default: out/)
 
