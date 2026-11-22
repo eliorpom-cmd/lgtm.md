@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Pin a release tag: a moving tag runs whatever code it points to on your account.
-      - uses: eliorpom-cmd/lgtm.md@v1.2.0
+      - uses: eliorpom-cmd/lgtm.md@v1.2.1
         with:
           repo: ${{ github.repository }}
           widgets: |

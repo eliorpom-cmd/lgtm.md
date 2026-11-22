@@ -2,7 +2,7 @@
 "use strict";
 
 // The release the generated workflow pins. Change it here only.
-const VERSION = "v1.2.0";
+const VERSION = "v1.2.1";
 const REPO_URL = "https://github.com/eliorpom-cmd/lgtm.md";
 const REPO_API = "https://api.github.com/repos/eliorpom-cmd/lgtm.md";
 
