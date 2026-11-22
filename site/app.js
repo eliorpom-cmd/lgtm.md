@@ -1479,22 +1479,15 @@ const HERO_SETS = [
   { top: "fireworks-commits", pair: ["median", "donut"] },
 ];
 
-// How one set replaces the other, in large pixels. Three candidates while one is chosen:
-// ?fx=pixels (the default), ?fx=focus or ?fx=sweep in the address bar. ?tour=1 stops the cycle
+// How one set replaces the other: big pixels turning in an even scatter. ?tour=1 stops the cycle
 // after one round (the play button starts it again).
-const HERO_FX_NAMES = ["pixels", "focus", "sweep"];
 const HERO_QUERY = new URLSearchParams(location.search);
-const HERO_FX = HERO_FX_NAMES.includes(HERO_QUERY.get("fx")) ? HERO_QUERY.get("fx") : "pixels";
 const HERO_ONE_ROUND = HERO_QUERY.get("tour") === "1";
 
 const HERO_SWAP = {
-  cell: 18,        // CSS px of a big pixel (pixels, sweep)
-  spread: 440,     // ms over which the big pixels of a slot turn (pixels)
+  cell: 18,        // CSS px of a big pixel
+  spread: 440,     // ms over which the big pixels of a slot turn
   flat: 70,        // ms a big pixel stays one flat colour while it turns
-  ladder: [4, 8, 16, 28], // CSS px of the mosaic steps (focus): out on the old set, back on the new
-  step: 60,        // ms per mosaic step (focus)
-  sweep: 520,      // ms for the front to cross a slot (sweep)
-  band: 2.5,       // big pixels of flat colour at the front (sweep)
   stagger: 90,     // ms between the top slot and the second row
 };
 
@@ -1530,7 +1523,7 @@ function averages(src, cols, rows) {
 // short) stays as it is until its turn. `screen` (the card with first frames) only gives the
 // colours of the old picture. On the last frame every rect shows its `to`; the caller then shows
 // the real images and clears the canvas. Returns { done: Promise, stop() }; stop() ends at once.
-function heroSwap(canvas, screen, jobs, fx) {
+function heroSwap(canvas, screen, jobs) {
   const o = HERO_SWAP;
   const ctx = canvas.getContext("2d");
   const dpr = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
@@ -1550,26 +1543,17 @@ function heroSwap(canvas, screen, jobs, fx) {
     const xs = Array.from({ length: cols + 1 }, (_, i) => x + Math.round((i * w) / cols));
     const ys = Array.from({ length: rows + 1 }, (_, j) => y + Math.round((j * h) / rows));
     const plan = { x, y, w, h, from, to: job.to, cols, rows, xs, ys, start: n * o.stagger };
-    if (fx === "focus") {
-      const level = (src, css) => averages(src, Math.max(1, Math.round(w / (css * dpr))), Math.max(1, Math.round(h / (css * dpr)))).canvas;
-      // Out: the old set coarsens step by step; in: the new set sharpens back.
-      plan.steps = [...o.ladder.map((k) => level(seen, k)), ...[...o.ladder].reverse().map((k) => level(job.to, k))];
-    } else {
-      plan.avgFrom = averages(seen, cols, rows).px;
-      plan.avgTo = averages(job.to, cols, rows).px;
-      plan.flip = [];
-      const D = cols + rows * 0.6;
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          plan.flip.push(fx === "sweep"
-            ? (c + r * 0.6) / D                                                  // diagonal front
-            : ((BAYER4[r % 4][c % 4] + 0.5) / 16) * 0.7 + Math.random() * 0.3);  // even scatter
-        }
+    plan.avgFrom = averages(seen, cols, rows).px;
+    plan.avgTo = averages(job.to, cols, rows).px;
+    plan.flip = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        plan.flip.push(((BAYER4[r % 4][c % 4] + 0.5) / 16) * 0.7 + Math.random() * 0.3);  // even scatter
       }
     }
     return plan;
   });
-  const length = fx === "focus" ? o.step * plans[0].steps.length : fx === "sweep" ? o.sweep + o.flat : o.spread + o.flat * 2;
+  const length = o.spread + o.flat * 2;
   const end = (plans.length - 1) * o.stagger + length;
 
   const color = (px, k) => `rgb(${px[k * 4]},${px[k * 4 + 1]},${px[k * 4 + 2]})`;
@@ -1592,26 +1576,10 @@ function heroSwap(canvas, screen, jobs, fx) {
       const local = t - p.start;
       if (local <= 0) { ctx.drawImage(p.from, p.x, p.y); continue; }
       if (local >= length) { ctx.drawImage(p.to, p.x, p.y); continue; }
-      if (fx === "focus") {
-        // Whole-slot mosaic, one level per step.
-        const k = Math.min(p.steps.length - 1, Math.floor(local / o.step));
-        if (local >= o.step * p.steps.length) ctx.drawImage(p.to, p.x, p.y);
-        else ctx.drawImage(p.steps[k], p.x, p.y, p.w, p.h);
-        continue;
-      }
       ctx.drawImage(p.to, p.x, p.y);
       for (let r = 0; r < p.rows; r++) {
         for (let c = 0; c < p.cols; c++) {
           const f = p.flip[r * p.cols + c];
-          if (fx === "sweep") {
-            // A stepped front: behind it the new widget, at it flat big pixels, ahead the old one.
-            const front = Math.floor((local / o.sweep) * (p.cols + 1)) / (p.cols + 1);
-            const band = o.band / (p.cols + p.rows * 0.6);
-            if (f < front - band) continue;
-            if (f < front) flat(p, p.avgTo, c, r);
-            else copy(p, p.from, c, r);
-            continue;
-          }
           // Each big pixel: old picture, flat old colour, flat new colour, new picture.
           const at = o.flat + f * o.spread;
           if (local >= at + o.flat) continue;
@@ -1831,7 +1799,7 @@ function heroCycle() {
         area(top, [[top, final[0]]]),
         area(row, jobs.slice(1).map((j, n) => [j.slot, final[n + 1]])),
       ];
-      const run = heroSwap(canvas, screen, areas, HERO_FX);
+      const run = heroSwap(canvas, screen, areas);
       swap = run;
       // A GIF that loads during the swap takes the still's place in the picture being built:
       // amid the big pixels the change goes unseen, and the swap ends on the GIF's first frame.
