@@ -1464,11 +1464,10 @@ async function heroIntro() {
   run.done.then(finish);
 }
 
-// Hero: after the intro, the README card shows other widgets every few seconds, each set
-// rebuilding from its pixels. The top slot takes a wide widget; the second row two small ones or
-// one wide one. Dots under the card show the sets and how long until the next one. Pauses off
-// screen, in a hidden tab, with the pointer on the card and with the pause button; never runs
-// with reduced motion (the intro does not run then either).
+// Hero: after the intro, the README card shows other widgets every few seconds. The top slot takes
+// a wide widget; the second row two small ones or one wide one. Dots under the card show the sets
+// and how long until the next one. Pauses off screen, in a hidden tab, with the pointer on the card
+// and with the pause button; never runs with reduced motion (the intro does not run then either).
 const HERO_EVERY = 4000;
 const HERO_SETS = [
   { top: "grass", pair: ["flame", "counter"] },
@@ -1479,6 +1478,173 @@ const HERO_SETS = [
   { top: "duel", pair: ["flame", "counter"] },
   { top: "fireworks-commits", pair: ["median", "donut"] },
 ];
+
+// How one set replaces the other, in large pixels. Three candidates while one is chosen:
+// ?fx=pixels (the default), ?fx=focus or ?fx=sweep in the address bar. ?tour=1 stops the cycle
+// after one round (the play button starts it again).
+const HERO_FX_NAMES = ["pixels", "focus", "sweep"];
+const HERO_QUERY = new URLSearchParams(location.search);
+const HERO_FX = HERO_FX_NAMES.includes(HERO_QUERY.get("fx")) ? HERO_QUERY.get("fx") : "pixels";
+const HERO_ONE_ROUND = HERO_QUERY.get("tour") === "1";
+
+const HERO_SWAP = {
+  cell: 18,        // CSS px of a big pixel (pixels, sweep)
+  spread: 440,     // ms over which the big pixels of a slot turn (pixels)
+  flat: 70,        // ms a big pixel stays one flat colour while it turns
+  ladder: [4, 8, 16, 28], // CSS px of the mosaic steps (focus): out on the old set, back on the new
+  step: 60,        // ms per mosaic step (focus)
+  sweep: 520,      // ms for the front to cross a slot (sweep)
+  band: 2.5,       // big pixels of flat colour at the front (sweep)
+  stagger: 90,     // ms between the top slot and the second row
+};
+
+// 4×4 Bayer thresholds: the big pixels turn in an even scatter rather than in clumps.
+const BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+// `img` drawn into [x, y, w, h] like object-fit: contain, on the widgets' background.
+function drawContained(g, img, x, y, w, h) {
+  g.fillStyle = "#0d1117";
+  g.fillRect(x, y, w, h);
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  if (!iw || !ih) return;
+  const k = Math.min(w / iw, h / ih);
+  g.drawImage(img, x + (w - iw * k) / 2, y + (h - ih * k) / 2, iw * k, ih * k);
+}
+
+// A canvas reduced to cols × rows by the browser's averaging, and its pixels.
+function averages(src, cols, rows) {
+  const c = document.createElement("canvas");
+  c.width = cols;
+  c.height = rows;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = "high";
+  g.drawImage(src, 0, 0, cols, rows);
+  return { canvas: c, px: g.getImageData(0, 0, cols, rows).data };
+}
+
+// Runs one swap on `canvas`, over the card as it is now. Each job is { rect: [x, y, w, h] in
+// canvas pixels, to: the new widgets at that size }. A part of the card not turned yet is left
+// clear, so the GIFs underneath keep playing: a canvas only gets a GIF's first frame, and drawing
+// it would make the numbers jump back at the click. What the canvas holds when called (a swap cut
+// short) stays as it is until its turn. `screen` (the card with first frames) only gives the
+// colours of the old picture. On the last frame every rect shows its `to`; the caller then shows
+// the real images and clears the canvas. Returns { done: Promise, stop() }; stop() ends at once.
+function heroSwap(canvas, screen, jobs, fx) {
+  const o = HERO_SWAP;
+  const ctx = canvas.getContext("2d");
+  const dpr = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
+  const plans = jobs.map((job, n) => {
+    const [x, y, w, h] = job.rect;
+    // What the canvas shows there now: clear, or the frame a cut-short swap stopped on.
+    const from = document.createElement("canvas");
+    from.width = w;
+    from.height = h;
+    from.getContext("2d").drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    const seen = document.createElement("canvas");
+    seen.width = w;
+    seen.height = h;
+    seen.getContext("2d").drawImage(screen, x, y, w, h, 0, 0, w, h);
+    const size = o.cell * dpr;
+    const cols = Math.max(1, Math.round(w / size)), rows = Math.max(1, Math.round(h / size));
+    const xs = Array.from({ length: cols + 1 }, (_, i) => x + Math.round((i * w) / cols));
+    const ys = Array.from({ length: rows + 1 }, (_, j) => y + Math.round((j * h) / rows));
+    const plan = { x, y, w, h, from, to: job.to, cols, rows, xs, ys, start: n * o.stagger };
+    if (fx === "focus") {
+      const level = (src, css) => averages(src, Math.max(1, Math.round(w / (css * dpr))), Math.max(1, Math.round(h / (css * dpr)))).canvas;
+      // Out: the old set coarsens step by step; in: the new set sharpens back.
+      plan.steps = [...o.ladder.map((k) => level(seen, k)), ...[...o.ladder].reverse().map((k) => level(job.to, k))];
+    } else {
+      plan.avgFrom = averages(seen, cols, rows).px;
+      plan.avgTo = averages(job.to, cols, rows).px;
+      plan.flip = [];
+      const D = cols + rows * 0.6;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          plan.flip.push(fx === "sweep"
+            ? (c + r * 0.6) / D                                                  // diagonal front
+            : ((BAYER4[r % 4][c % 4] + 0.5) / 16) * 0.7 + Math.random() * 0.3);  // even scatter
+        }
+      }
+    }
+    return plan;
+  });
+  const length = fx === "focus" ? o.step * plans[0].steps.length : fx === "sweep" ? o.sweep + o.flat : o.spread + o.flat * 2;
+  const end = (plans.length - 1) * o.stagger + length;
+
+  const color = (px, k) => `rgb(${px[k * 4]},${px[k * 4 + 1]},${px[k * 4 + 2]})`;
+  const cellAt = (p, c, r) => [p.xs[c], p.ys[r], p.xs[c + 1] - p.xs[c], p.ys[r + 1] - p.ys[r]];
+  // One cell of the old picture: cleared down to the card, plus what a cut-short swap left there.
+  const copy = (p, src, c, r) => {
+    const [cx, cy, cw, ch] = cellAt(p, c, r);
+    ctx.clearRect(cx, cy, cw, ch);
+    ctx.drawImage(src, cx - p.x, cy - p.y, cw, ch, cx, cy, cw, ch);
+  };
+  const flat = (p, px, c, r) => {
+    ctx.fillStyle = color(px, r * p.cols + c);
+    ctx.fillRect(...cellAt(p, c, r));
+  };
+
+  const draw = (t) => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = false;
+    for (const p of plans) {
+      const local = t - p.start;
+      if (local <= 0) { ctx.drawImage(p.from, p.x, p.y); continue; }
+      if (local >= length) { ctx.drawImage(p.to, p.x, p.y); continue; }
+      if (fx === "focus") {
+        // Whole-slot mosaic, one level per step.
+        const k = Math.min(p.steps.length - 1, Math.floor(local / o.step));
+        if (local >= o.step * p.steps.length) ctx.drawImage(p.to, p.x, p.y);
+        else ctx.drawImage(p.steps[k], p.x, p.y, p.w, p.h);
+        continue;
+      }
+      ctx.drawImage(p.to, p.x, p.y);
+      for (let r = 0; r < p.rows; r++) {
+        for (let c = 0; c < p.cols; c++) {
+          const f = p.flip[r * p.cols + c];
+          if (fx === "sweep") {
+            // A stepped front: behind it the new widget, at it flat big pixels, ahead the old one.
+            const front = Math.floor((local / o.sweep) * (p.cols + 1)) / (p.cols + 1);
+            const band = o.band / (p.cols + p.rows * 0.6);
+            if (f < front - band) continue;
+            if (f < front) flat(p, p.avgTo, c, r);
+            else copy(p, p.from, c, r);
+            continue;
+          }
+          // Each big pixel: old picture, flat old colour, flat new colour, new picture.
+          const at = o.flat + f * o.spread;
+          if (local >= at + o.flat) continue;
+          if (local >= at) flat(p, p.avgTo, c, r);
+          else if (local >= at - o.flat) flat(p, p.avgFrom, c, r);
+          else copy(p, p.from, c, r);
+        }
+      }
+    }
+  };
+
+  let raf = 0, over = false, resolve;
+  const done = new Promise((r) => { resolve = r; });
+  const stop = () => {
+    if (over) return;
+    over = true;
+    cancelAnimationFrame(raf);
+    resolve();
+  };
+  const t0 = performance.now();
+  const frame = (now) => {
+    const t = now - t0;
+    // The last frame shows every new widget whole, however late it comes.
+    if (t >= end) { draw(end); return stop(); }
+    draw(t);
+    raf = requestAnimationFrame(frame);
+  };
+  // The first frame is drawn now, in the same task as the caller's layout change: no flash.
+  draw(0);
+  raf = requestAnimationFrame(frame);
+  return { done, stop };
+}
+
 function heroCycle() {
   const art = $(".hero-art");
   if (!art || reducedMotion() || heroCycle.on) return;
@@ -1487,19 +1653,41 @@ function heroCycle() {
   const top = art.querySelector(".readme-body > .slot");
   const [left, right] = art.querySelectorAll(".slot-row > .slot:not(.slot-full)");
   const full = art.querySelector(".slot-full");
+  const row = art.querySelector(".slot-row");
   const dotsBox = art.querySelector(".hero-dots");
   const pause = art.querySelector(".hero-pause");
-  let i = 0, timer = 0, run = null, inView = true, hover = false, token = 0;
+  let i = 0, timer = 0, swap = null, inView = true, hover = false, token = 0, rounds = 0;
   // Time already shown of the current set, so a pause resumes where the bar stopped.
   let elapsed = 0, startedAt = 0;
   const fileOf = (id) => { const w = BY_ID.get(id); return w.file || w.id; };
   const nameOf = (id) => BY_ID.get(id).name;
+  const jobsOf = (set) => set.full
+    ? [{ slot: top, id: set.top }, { slot: full, id: set.full }]
+    : [{ slot: top, id: set.top }, { slot: left, id: set.pair[0] }, { slot: right, id: set.pair[1] }];
+
+  // Stills (about 150 KB in all) load at once, so a dot answers the moment it is clicked; each
+  // set's GIFs start loading while the set before it is on screen.
+  const stills = new Map(), gifs = new Map(), gifsOk = new Set(), gifImgs = new Map();
+  const decoded = (img) => (img.decode ? img.decode().then(() => img) : Promise.resolve(img));
+  const still = (id) => {
+    if (!stills.has(id)) stills.set(id, loadImage(`stills/${fileOf(id)}.webp`).then(decoded));
+    return stills.get(id);
+  };
+  const gif = (id) => {
+    if (!gifs.has(id)) {
+      const img = new Image();
+      img.src = `widgets/${fileOf(id)}.gif`;
+      gifs.set(id, decoded(img).then((i) => { gifsOk.add(id); gifImgs.set(id, i); return i; }));
+    }
+    return gifs.get(id);
+  };
+  for (const set of HERO_SETS) for (const j of jobsOf(set)) still(j.id).catch(() => {});
 
   // One pixel per set under the card; the current one fills until the next set.
   dotsBox.style.setProperty("--hero-every", `${HERO_EVERY}ms`);
   const list = dotsBox.querySelector(".hero-dot-list");
-  list.innerHTML = HERO_SETS.map((set, k) => {
-    const names = [set.top, ...(set.full ? [set.full] : set.pair)].map(nameOf).join(", ");
+  list.innerHTML = HERO_SETS.map((set) => {
+    const names = jobsOf(set).map((j) => nameOf(j.id)).join(", ");
     return `<button class="hero-dot" type="button" aria-label="Show ${esc(names)}"></button>`;
   }).join("");
   const dots = [...list.children];
@@ -1509,104 +1697,184 @@ function heroCycle() {
     if (k === i) d.setAttribute("aria-current", "true"); else d.removeAttribute("aria-current");
   });
 
-  // The still drawn into the slot's shape on the widgets' background, as the GIF will show.
-  const fitted = (img, rect) => {
-    const R = rect.width / rect.height, iw = img.naturalWidth, ih = img.naturalHeight;
-    const c = document.createElement("canvas");
-    c.width = Math.round(iw / ih > R ? iw : ih * R);
-    c.height = Math.round(iw / ih > R ? iw / R : ih);
-    const g = c.getContext("2d");
-    g.fillStyle = "#0d1117";
-    g.fillRect(0, 0, c.width, c.height);
-    g.drawImage(img, (c.width - iw) / 2, (c.height - ih) / 2);
-    return c;
+  const setPaused = (paused) => {
+    pause.setAttribute("aria-pressed", String(paused));
+    pause.setAttribute("aria-label", paused ? "Play the widgets" : "Pause the widgets");
+  };
+  const next = () => {
+    const k = (i + 1) % HERO_SETS.length;
+    // One round only (?tour=1): back on the first set, the cycle pauses itself.
+    if (HERO_ONE_ROUND && k === 0 && rounds++ === 0) setPaused(true);
+    show(k);
   };
 
   const schedule = () => {
     clearTimeout(timer);
     const blocked = pause.getAttribute("aria-pressed") === "true" || hover || !inView || document.hidden;
     dotsBox.classList.toggle("is-paused", blocked);
-    if (run) return;
-    if (blocked) {
-      if (startedAt) { elapsed += performance.now() - startedAt; startedAt = 0; }
-      return;
-    }
+    if (swap) return;
+    const now = performance.now();
+    // Time shown so far counts once, whatever calls this (a tap on the card, the observer...).
+    if (startedAt) { elapsed += now - startedAt; startedAt = 0; }
+    if (blocked) return;
     const dot = dots[i];
     if (!dot.classList.contains("is-running")) { void dot.offsetWidth; dot.classList.add("is-running"); }
-    startedAt = performance.now();
-    timer = setTimeout(() => show((i + 1) % HERO_SETS.length), Math.max(0, HERO_EVERY - elapsed));
+    startedAt = now;
+    timer = setTimeout(next, Math.max(0, HERO_EVERY - elapsed));
+    for (const j of jobsOf(HERO_SETS[(i + 1) % HERO_SETS.length])) gif(j.id).catch(() => {});
   };
 
-  // A dot clicked during a build ends it: the latest call wins (token).
+  // Rects in canvas pixels, relative to the canvas.
+  const sizeCanvas = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const box = canvas.getBoundingClientRect();
+    const w = Math.round(box.width * dpr), h = Math.round(box.height * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    return { box, dpr };
+  };
+  const rectOf = (el, { box, dpr }) => {
+    const r = el.getBoundingClientRect();
+    const x = Math.round((r.left - box.left) * dpr), y = Math.round((r.top - box.top) * dpr);
+    return [x, y, Math.round((r.right - box.left) * dpr) - x, Math.round((r.bottom - box.top) * dpr) - y];
+  };
+  const visible = (slot) => !slot.hidden && !slot.classList.contains("is-off") && slot.offsetParent !== null;
+  // What the card shows right now, including a swap in progress on the canvas.
+  const snapshot = (geo, midSwap) => {
+    const s = document.createElement("canvas");
+    s.width = canvas.width;
+    s.height = canvas.height;
+    const g = s.getContext("2d");
+    g.fillStyle = "#0d1117";
+    g.fillRect(...rectOf(top, geo));
+    g.fillRect(...rectOf(row, geo));
+    for (const slot of [top, left, right, full]) if (visible(slot)) drawContained(g, slot.querySelector("img"), ...rectOf(slot, geo));
+    if (midSwap) g.drawImage(canvas, 0, 0);
+    return s;
+  };
+  // The final state of a set: its slots laid out and showing their images: the GIF when the swap
+  // ended on it (`gifEnd`), the still until the GIF has loaded otherwise. Resolves once the images
+  // are ready to paint, so the canvas above can go without a blank frame.
+  const settle = (set, images, my, gifEnd) => {
+    const shown = [];
+    for (const [n, j] of jobsOf(set).entries()) {
+      const img = j.slot.querySelector("img");
+      const gifUrl = `widgets/${fileOf(j.id)}.gif`;
+      j.slot.dataset.showing = j.id;
+      const onGif = !images || gifEnd.has(j.id);
+      img.src = onGif ? gifUrl : images[n].src;
+      j.slot.classList.remove("is-off");
+      shown.push(img);
+      if (!onGif) gif(j.id).then((g) => {
+        if (my === token && j.slot.dataset.showing === j.id) img.src = g.src;
+      }, () => {});
+    }
+    if (set.full) { left.classList.add("is-off"); right.classList.add("is-off"); }
+    else full.hidden = true;
+    const ready = Promise.all(shown.map((img) => (img.decode ? img.decode().catch(() => {}) : null)));
+    return Promise.race([ready, new Promise((r) => setTimeout(r, 400))]);
+  };
+
+  // A dot clicked during a swap starts the next one from what is on screen: the latest call wins.
   const show = async (k) => {
-    if (k === i && !run) return;
+    if (k === i) return;
     const my = ++token;
-    run?.stop();
     clearTimeout(timer);
     i = k;
     elapsed = 0;
     startedAt = 0;
     markDot();
     const set = HERO_SETS[i];
-    const jobs = [{ slot: top, id: set.top }];
-    if (set.full) jobs.push({ slot: full, id: set.full });
-    else jobs.push({ slot: left, id: set.pair[0] }, { slot: right, id: set.pair[1] });
-    run = { stop() {} };
-    let stills;
+    const jobs = jobsOf(set);
+    for (const j of jobs) gif(j.id).catch(() => {});
+    swap = swap || { stop() {} };
+    const gifEnd = new Set();
+    let images = null;
     try {
-      stills = await Promise.race([Promise.all(jobs.map((j) => loadImage(`stills/${fileOf(j.id)}.webp`))), new Promise((_, r) => setTimeout(r, 2000))]);
-    } catch { if (my === token) { run = null; schedule(); } return; }
+      images = await Promise.race([Promise.all(jobs.map((j) => still(j.id))), new Promise((_, r) => setTimeout(r, 1500))]);
+    } catch { /* no stills: straight to the GIFs */ }
     if (my !== token) return;
-    // The wide slot must be in the layout to be measured; it stays invisible until it is live.
-    if (set.full && full.hidden) { full.classList.add("is-off"); full.hidden = false; }
+    // The canvas is display:none until is-cycling: shown first so it can be measured. Layout,
+    // snapshot and the swap's first frame all happen in this task, so nothing paints in between.
+    // A swap still running is part of what the card shows; otherwise the canvas holds nothing.
+    const midSwap = art.classList.contains("is-cycling");
     art.classList.add("is-cycling");
-    const box = canvas.getBoundingClientRect();
-    let pairLive = 0;
-    run = pixelBuild(canvas, jobs.map((j, n) => {
-      const r = j.slot.getBoundingClientRect();
-      const gif = new Image();
-      gif.src = `widgets/${fileOf(j.id)}.gif`;
-      const still = fitted(stills[n], r);
-      const cell = still.width / Math.max(8, r.width / 12);
-      return {
-        rect: [r.left - box.left, r.top - box.top, r.width, r.height],
-        still, start: n * 140, cell, sharpen: [cell / 2, cell / 4].filter((v) => v >= 1),
-        ready: () => gifReady(gif),
-        onLive: () => {
-          j.slot.querySelector("img").src = gif.src;
-          j.slot.classList.remove("is-off");
-          if (j.slot === full) { left.classList.add("is-off"); right.classList.add("is-off"); }
-          else if (j.slot !== top && ++pairLive === 1) { full.hidden = true; full.classList.remove("is-off"); }
-        },
+    // The wide slot gets a box to be measured, still invisible: the card itself only changes
+    // when the swap is over (the pair keeps its boxes under the wide slot).
+    if (set.full && full.hidden) { full.classList.add("is-off"); full.hidden = false; }
+    const geo = sizeCanvas();
+    const screen = snapshot(geo, midSwap);
+    swap.stop();
+    if (images) {
+      // Two areas: the top slot and the whole second row, gap included, as each will look.
+      const area = (el, parts) => {
+        const rect = rectOf(el, geo);
+        const to = document.createElement("canvas");
+        to.width = rect[2];
+        to.height = rect[3];
+        const g = to.getContext("2d");
+        g.fillStyle = "#0d1117";
+        g.fillRect(0, 0, rect[2], rect[3]);
+        // A GIF already loaded will start from its first frame, which is also what drawImage
+        // takes from it: the swap ends on exactly what the slot shows next.
+        for (const [slot, img] of parts) {
+          const r = rectOf(slot, geo);
+          drawContained(g, img, r[0] - rect[0], r[1] - rect[1], r[2], r[3]);
+        }
+        return { rect, to, put: (slot, img) => {
+          const r = rectOf(slot, geo);
+          drawContained(g, img, r[0] - rect[0], r[1] - rect[1], r[2], r[3]);
+        } };
       };
-    }), { rows: 380, jitter: 100, fall: 320 });
-    await run.done;
+      const final = jobs.map((j, n) => (gifsOk.has(j.id) ? gifImgs.get(j.id) : images[n]));
+      for (const j of jobs) if (gifsOk.has(j.id)) gifEnd.add(j.id);
+      const areas = [
+        area(top, [[top, final[0]]]),
+        area(row, jobs.slice(1).map((j, n) => [j.slot, final[n + 1]])),
+      ];
+      const run = heroSwap(canvas, screen, areas, HERO_FX);
+      swap = run;
+      // A GIF that loads during the swap takes the still's place in the picture being built:
+      // amid the big pixels the change goes unseen, and the swap ends on the GIF's first frame.
+      let running = true;
+      for (const [n, j] of jobs.entries()) {
+        if (gifEnd.has(j.id)) continue;
+        gif(j.id).then((g) => {
+          if (!running || my !== token) return;
+          areas[n === 0 ? 0 : 1].put(j.slot, g);
+          gifEnd.add(j.id);
+        }, () => {});
+      }
+      await run.done;
+      running = false;
+      if (my !== token) return;
+    }
+    await settle(set, images, my, gifEnd);
     if (my !== token) return;
-    run = null;
     art.classList.remove("is-cycling");
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    swap = null;
     schedule();
   };
 
   dotsBox.hidden = false;
   markDot();
+  for (const j of jobsOf(HERO_SETS[0])) j.slot.dataset.showing = j.id;
   list.addEventListener("click", (e) => {
     const k = dots.indexOf(e.target.closest(".hero-dot"));
     if (k >= 0) show(k);
   });
   pause.addEventListener("click", () => {
-    const paused = pause.getAttribute("aria-pressed") !== "true";
-    pause.setAttribute("aria-pressed", String(paused));
-    pause.setAttribute("aria-label", paused ? "Play the widgets" : "Pause the widgets");
+    setPaused(pause.getAttribute("aria-pressed") !== "true");
     schedule();
   });
   // Under the pointer, only the card pauses the cycle: the dots below stay free to use.
   const card = art.querySelector(".readme");
   card.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") { hover = true; schedule(); } });
-  card.addEventListener("pointerleave", () => { hover = false; schedule(); });
+  card.addEventListener("pointerleave", () => { if (hover) { hover = false; schedule(); } });
   new IntersectionObserver((entries) => { inView = entries.some((e) => e.isIntersecting); schedule(); }, { threshold: 0.3 }).observe(art);
   document.addEventListener("visibilitychange", schedule);
-  // A resize moves the slots under the canvas: the build ends and the GIFs show.
-  window.addEventListener("resize", () => run?.stop());
+  // A resize moves the slots under the canvas: the swap ends at once.
+  window.addEventListener("resize", () => swap?.stop());
   schedule();
 }
 
