@@ -135,7 +135,8 @@ const HOTSPOTS = {
 };
 
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
-const REPO_RE = /^([A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38})\/([A-Za-z0-9._-]{1,100})$/;
+// "." and ".." are refused, as the Action refuses them (src/data.rs valid_repo).
+const REPO_RE = /^([A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38})\/(?!\.\.?$)([A-Za-z0-9._-]{1,100})$/;
 const LOGIN_ERROR = "A GitHub login has letters, digits and single hyphens, up to 39 characters.";
 
 const state = {
@@ -211,6 +212,7 @@ function targetInfo() {
 // also answers with a 404: there it is only a warning. A network error or a rate limit never blocks.
 const repoCheck = new Map(); // "owner/repo" (lowercase) -> "checking" | "ok" | "missing" | "unknown"
 let repoTimer = 0;
+let repoPending = ""; // the key whose check waits in repoTimer
 
 function repoStatus(t) {
   if (!t.ok) return "ok";
@@ -226,7 +228,12 @@ function checkRepo(force = false) {
   // A re-check keeps "missing" on screen until the answer, so the message doesn't blink.
   if (!known) repoCheck.set(key, "checking");
   clearTimeout(repoTimer);
+  // A check cancelled while typing must not stay "checking" for ever: coming back to that
+  // login (a typo, then Backspace) would block Continue with no request on its way.
+  if (repoPending && repoPending !== key && repoCheck.get(repoPending) === "checking") repoCheck.delete(repoPending);
+  repoPending = key;
   repoTimer = setTimeout(async () => {
+    repoPending = "";
     let status = "unknown";
     try {
       const res = await fetch(`https://api.github.com/repos/${t.owner}/${t.repo}`, { headers: { Accept: "application/vnd.github+json" }, cache: "no-store" });
@@ -852,11 +859,13 @@ let opener = null;
 // Every way it can fail ends on a sentence and a link to the Actions tab, never on silence.
 const RUN = { fast: 5000, slow: 10000, fastFor: 60e3, max: 300e3, margin: 10 * 60e3, netTries: 3 };
 let runPoll = null;     // the check in progress, or null
-let runDone = "";       // "owner/repo" of the last finished check, so reopening step 6 keeps its result
+let runDone = "";       // runKey() of the last finished check, so reopening step 6 keeps its result
 
+// The repository and the time of "I committed it": a new commit to the same repository is a new
+// run to follow, not the result of the last one.
 function runKey() {
   const t = targetInfo();
-  return t.ok ? `${t.owner}/${t.repo}` : "";
+  return t.ok ? `${t.owner}/${t.repo}@${state.committedAt || 0}` : "";
 }
 
 function actionsLink(text = "Actions tab ↗") {
@@ -907,7 +916,7 @@ function startRunCheck() {
 }
 
 async function checkRun(poll) {
-  const [owner, repo] = poll.key.split("/");
+  const [owner, repo] = poll.key.split("@")[0].split("/");
   const again = () => {
     if (runPoll !== poll) return;
     const spent = Date.now() - poll.t0;
@@ -1786,7 +1795,8 @@ function init() {
   const detail = $("#detail");
   detail.addEventListener("click", (e) => { if (e.target === detail) detail.close(); });
   detail.addEventListener("close", () => {
-    document.documentElement.classList.remove("modal-open");
+    // "Add this widget" opens the setup before this event arrives: the page must stay locked.
+    if (!$("#setup").open) document.documentElement.classList.remove("modal-open");
     if (detailOpener && document.contains(detailOpener) && !$("#setup").open) detailOpener.focus();
   });
   // Pins and legend lines light each other up.
